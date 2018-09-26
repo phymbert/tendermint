@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"reflect"
 	"sort"
 	"sync"
 	"testing"
@@ -306,22 +307,173 @@ func randConsensusState(nValidators int) (*ConsensusState, []*validatorStub) {
 
 //-------------------------------------------------------------------------------
 
-func ensureNoNewStep(stepCh <-chan interface{}) {
-	timer := time.NewTimer(ensureTimeout)
+func ensureNoNewEvent(t *testing.T, ch <-chan interface{}, timeout time.Duration,
+	errorMessage string) {
 	select {
-	case <-timer.C:
+	case <-time.After(timeout):
 		break
-	case <-stepCh:
-		panic("We should be stuck waiting, not moving to the next step")
+	case <-ch:
+		panic(errorMessage)
 	}
 }
 
-func ensureNewStep(stepCh <-chan interface{}) {
-	timer := time.NewTimer(ensureTimeout)
+func ensureNoNewEventOnChannel(t *testing.T, ch <-chan interface{}) {
+	ensureNoNewEvent(t, ch, ensureTimeout, "We should be stuck waiting, "+
+		"not receiving new event on the channel")
+}
+
+func ensureNoNewRoundStep(t *testing.T, stepCh <-chan interface{}) {
+	ensureNoNewEvent(t, stepCh, ensureTimeout, "We should be stuck waiting, "+
+		"not receiving NewRoundStep event")
+}
+
+func ensureNoNewUnlock(t *testing.T, unlockCh <-chan interface{}) {
+	ensureNoNewEvent(t, unlockCh, ensureTimeout, "We should be stuck waiting, "+
+		"not receiving Unlock event")
+}
+
+func ensureNoNewTimeout(t *testing.T, stepCh <-chan interface{}, timeout int64) {
+	timeoutDuration := time.Duration(timeout*5) * time.Nanosecond
+	ensureNoNewEvent(t, stepCh, timeoutDuration, "We should be stuck waiting, "+
+		"not receiving NewTimeout event")
+}
+
+func ensureNewEvent(t *testing.T, ch <-chan interface{}, height int64, round int,
+	timeout time.Duration, errorMessage string) {
 	select {
-	case <-timer.C:
-		panic("We shouldnt be stuck waiting")
-	case <-stepCh:
+	case <-time.After(timeout):
+		panic(errorMessage)
+	case ev := <-ch:
+		rs, ok := ev.(types.EventDataRoundState)
+		if !ok {
+			panic(fmt.Sprintf("expected a *types.EventDataRoundState, "+
+				"got %v. wrong subscription channel?",
+				reflect.TypeOf(rs)))
+		}
+		if rs.Height != height {
+			panic(fmt.Sprintf("expected height %v, got %v", height, rs.Height))
+		}
+		if rs.Round != round {
+			panic(fmt.Sprintf("expected round %v, got %v", round, rs.Round))
+		}
+		// TODO: We could check also for a step at this point!
+	}
+}
+
+func ensureNewRoundStep(t *testing.T, stepCh <-chan interface{}, height int64, round int) {
+	ensureNewEvent(t, stepCh, height, round, ensureTimeout,
+		"Timeout expired while waiting for NewStep event")
+}
+
+func ensureNewVote(t *testing.T, voteCh <-chan interface{}, height int64, round int) {
+	select {
+	case <-time.After(ensureTimeout):
+		break
+	case v := <-voteCh:
+		edv, ok := v.(types.EventDataVote)
+		if !ok {
+			panic(fmt.Sprintf("expected a *types.Vote, "+
+				"got %v. wrong subscription channel?",
+				reflect.TypeOf(v)))
+		}
+		vote := edv.Vote
+		if vote.Height != height {
+			panic(fmt.Sprintf("expected height %v, got %v", height, vote.Height))
+		}
+		if vote.Round != round {
+			panic(fmt.Sprintf("expected round %v, got %v", round, vote.Round))
+		}
+	}
+}
+
+func ensureNewRound(t *testing.T, roundCh <-chan interface{}, height int64, round int) {
+	ensureNewEvent(t, roundCh, height, round, ensureTimeout,
+		"Timeout expired while waiting for NewRound event")
+}
+
+func ensureNewTimeout(t *testing.T, timeoutCh <-chan interface{}, height int64, round int, timeout int64) {
+	timeoutDuration := time.Duration(timeout*5) * time.Nanosecond
+	ensureNewEvent(t, timeoutCh, height, round, timeoutDuration,
+		"Timeout expired while waiting for NewTimeout event")
+}
+
+func ensureNewProposal(t *testing.T, proposalCh <-chan interface{}, height int64, round int) {
+	ensureNewEvent(t, proposalCh, height, round, ensureTimeout,
+		"Timeout expired while waiting for NewProposal event")
+}
+
+func ensureNewBlock(t *testing.T, blockCh <-chan interface{}, height int64) {
+	select {
+	case <-time.After(ensureTimeout):
+		panic("Timeout expired while waiting for NewBlock event")
+	case ev := <-blockCh:
+		block, ok := ev.(types.EventDataNewBlock)
+		if !ok {
+			panic(fmt.Sprintf("expected a *types.EventDataNewBlock, "+
+				"got %v. wrong subscription channel?",
+				reflect.TypeOf(block)))
+		}
+		if block.Block.Height != height {
+			panic(fmt.Sprintf("expected height %v, got %v", height, block.Block.Height))
+		}
+	}
+}
+
+func ensureNewBlockHeader(t *testing.T, blockCh <-chan interface{}, height int64, blockHash cmn.HexBytes) {
+	select {
+	case <-time.After(ensureTimeout):
+		panic("Timeout expired while waiting for NewBlockHeader event")
+	case ev := <-blockCh:
+		blockHeader, ok := ev.(types.EventDataNewBlockHeader)
+		if !ok {
+			panic(fmt.Sprintf("expected a *types.EventDataNewBlockHeader, "+
+				"got %v. wrong subscription channel?",
+				reflect.TypeOf(blockHeader)))
+		}
+		if blockHeader.Header.Height != height {
+			panic(fmt.Sprintf("expected height %v, got %v", height, blockHeader.Header.Height))
+		}
+		if !bytes.Equal(blockHeader.Header.Hash(), blockHash) {
+			panic(fmt.Sprintf("expected header %v, got %v", blockHash, blockHeader.Header.Hash()))
+		}
+	}
+}
+
+func ensureNewUnlock(t *testing.T, unlockCh <-chan interface{}, height int64, round int) {
+	ensureNewEvent(t, unlockCh, height, round, ensureTimeout,
+		"Timeout expired while waiting for NewUnlock event")
+}
+
+func ensureVote(t *testing.T, voteCh <-chan interface{}, height int64, round int,
+	voteType byte) {
+	select {
+	case <-time.After(ensureTimeout):
+		panic("Timeout expired while waiting for NewVote event")
+	case v := <-voteCh:
+		edv, ok := v.(types.EventDataVote)
+		if !ok {
+			panic(fmt.Sprintf("expected a *types.Vote, "+
+				"got %v. wrong subscription channel?",
+				reflect.TypeOf(v)))
+		}
+		vote := edv.Vote
+		if vote.Height != height {
+			panic(fmt.Sprintf("expected height %v, got %v", height, vote.Height))
+		}
+		if vote.Round != round {
+			panic(fmt.Sprintf("expected round %v, got %v", round, vote.Round))
+		}
+		if vote.Type != voteType {
+			panic(fmt.Sprintf("expected type %v, got %v", voteType, vote.Type))
+		}
+	}
+}
+
+func ensureNewEventOnChannel(t *testing.T, ch <-chan interface{}) {
+	select {
+	case <-time.After(ensureTimeout):
+		panic("Timeout expired while waiting for new activity on the channel")
+	case <-ch:
 		break
 	}
 }
